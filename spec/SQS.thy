@@ -36,4 +36,21 @@ fun SQS_step :: "'a SQSState \<Rightarrow> 'a SQSRequest \<Rightarrow> 'a SQSSta
 | "SQS_step st (SQSRequest c (Receive n)) = (st, Some (SQSResponse c (Returned (take n (messages st)))))"
 | "SQS_step st (SQSRequest c (Delete mid)) = (st \<lparr> messages := filter (\<lambda>(m,_). m \<noteq> mid) (messages st) \<rparr>, None)"
 
+fun steps :: "('s \<Rightarrow> 'q \<Rightarrow> 's \<times> 'p option) \<Rightarrow> 's \<Rightarrow> 'q list \<Rightarrow> 's \<times> 'p list" where
+  "steps f s0 [] = (s0, [])"
+| "steps f s (q#qs) = (let (s',p') = f s q in let (s'',ps) = steps f s' qs in (s'', case p' of None \<Rightarrow> ps | Some(p) \<Rightarrow> p # ps))"
+
+lemma "steps SQS_step initialSQSState [] = (initialSQSState, [])"
+  by simp
+
+lemma "steps SQS_step (initialSQSState :: nat SQSState) [
+  SQSRequest (ClientId 0) (Send 10),
+  SQSRequest (ClientId 0) (Send 5),
+  SQSRequest (ClientId 0) (Send 1),
+  SQSRequest (ClientId 0) (Receive 3),
+  SQSRequest (ClientId 0) (Delete (MessageId 0))] =
+  (\<lparr> messages = [(MessageId 1, 5), (MessageId 2, 1)], messageIdCounter = 3 \<rparr> :: nat SQSState,
+  [SQSResponse (ClientId 0) (Returned [(MessageId 0, 10), (MessageId 1, 5), (MessageId 2, 1)])])"
+  by (simp add: initialSQSState_def)
+
 end
