@@ -43,15 +43,6 @@ fun step :: "'val StepFunction" where
 | "step Acceptor st (Sent _ (Accept val)) = (st \<lparr> accepted := accepted st \<union> {val} \<rparr>, {})"
 | "step _ st _ = (st, {})"
 
-inductive execute :: "'val StepFunction \<Rightarrow> 'val State \<Rightarrow> (Node \<times> (Node, 'val Message) Event) list \<Rightarrow> (Node \<times> 'val Message) set \<Rightarrow> bool" where
-  exec_empty: "execute step' st [] {}"
-| exec_step: "\<lbrakk> execute step' st events msgs;
-    valid_event event proc msgs;
-    step' proc st event = (st', ns);
-    events' = events @ [(proc, event)];
-    msgs' = msgs \<union> (\<lambda>msg. (proc, msg)) ` ns
-  \<rbrakk> \<Longrightarrow> execute step' st' events' msgs'"
-
 inductive execute_step where
   exec_step: "\<lbrakk> valid_event event proc msgs;
     step' proc st event = (st', ns);
@@ -59,79 +50,146 @@ inductive execute_step where
     msgs' = msgs \<union> (\<lambda>msg. (proc,msg)) ` ns
   \<rbrakk> \<Longrightarrow> execute_step step' (st,events,msgs) (st',events',msgs')"
 
-definition execute_steps where
-  "execute_steps step' \<equiv> rtranclp (execute_step step')"
+definition execute where
+  "execute step' \<equiv> rtranclp (execute_step step')"
 
 type_synonym 'val world = "'val State \<times> (Node \<times> (Node, 'val Message) Event) list \<times> (Node \<times> 'val Message) set"
 
-type_synonym 'val Predicate = "'val world \<Rightarrow> bool"
-datatype 'val Prop
-  = Atom "'val Predicate"
-  | Not "'val Prop"
-  | Or "'val Prop" "'val Prop"  (infix "[\<or>]" 40)
-  | Next "'val Prop"  ("\<circle> _" [100] 80)
-  | Until "'val Prop" "'val Prop"  (infix "[U]" 40)
+inductive execute_traced :: "'val StepFunction \<Rightarrow> 'val world \<Rightarrow> 'val world \<Rightarrow> 'val world list \<Rightarrow> bool" where
+  execute_traced_empty: "execute_traced step' w w []"
+| execute_traced_cons: "\<lbrakk> execute_traced step' w1 w2 path; execute_step step' w2 w3 \<rbrakk> \<Longrightarrow> execute_traced step' w1 w3 (path @ [w2])"
 
-definition And (infix "[\<and>]" 45) where
-  "And p q = Not (Not p [\<or>] Not q)"
-
-definition true where
-  "true \<equiv> Atom (\<lambda>_. True)"
-
-definition false where
-  "false \<equiv> Atom (\<lambda>_. False)"
-
-definition Release :: "'val Prop \<Rightarrow> 'val Prop \<Rightarrow> 'val Prop" (infix "[R]" 50) where
-  "\<phi> [R] \<psi> \<equiv> Not (Not \<phi> [U] Not \<psi>)"
-
-definition Finally :: "'val Prop \<Rightarrow> 'val Prop" ("\<diamondsuit> _" [100] 80) where
-  "\<diamondsuit>\<phi> \<equiv> true [U] \<phi>"
-
-definition Globally :: "'val Prop \<Rightarrow> 'val Prop" ("\<box> _" [100] 80) where
-  "\<box>\<phi> \<equiv> false [R] \<phi>"
-
-definition Paths :: "'val world \<Rightarrow> (nat \<Rightarrow> 'val world) set" where
-  "Paths w = {\<pi>. \<pi> 0 = w \<and> (\<forall>i. execute_step step (\<pi> i) (\<pi> (i+1)))}"
-
-definition suffix where
-  "suffix k \<pi> \<equiv> \<lambda>i. \<pi> (k+i)"
-
-primrec semantical_path :: "(nat \<Rightarrow> 'val world) \<Rightarrow> 'val Prop \<Rightarrow> bool" (infix "\<Turnstile>p" 60) where
-  "(\<pi> \<Turnstile>p Atom p) = p (\<pi> 0)"
-| "(\<pi> \<Turnstile>p Not p) = (\<not> (\<pi> \<Turnstile>p p))"
-| "(\<pi> \<Turnstile>p Or p q) = (\<pi> \<Turnstile>p p \<or> \<pi> \<Turnstile>p q)"
-| "(\<pi> \<Turnstile>p Next p) = (suffix 1 \<pi> \<Turnstile>p p)"
-| "(\<pi> \<Turnstile>p Until p q) = (\<exists>i. suffix i \<pi> \<Turnstile>p q \<and> (\<forall>j. i < j \<longrightarrow> suffix j \<pi> \<Turnstile>p p))"
-
-definition semantical :: "'val world \<Rightarrow> 'val Prop \<Rightarrow> bool" (infix "\<Turnstile>" 60) where
-  "w \<Turnstile> p = (\<forall>\<pi>. \<pi> 0 = w \<and> \<pi> \<Turnstile>p p)"
-
-lemma not_true_iff_false [simp]:
-  "w \<Turnstile> Not true = w \<Turnstile> false"
-  by (simp add: semantical_def true_def false_def)
-
-lemma next_not_compat [simp]:
-  "w \<Turnstile> \<circle> (Not \<phi>) = w \<Turnstile> Not (\<circle> \<phi>)"
-  by (simp add: semantical_def)
-
-lemma path_until_release_iff:
-  "\<pi> \<Turnstile>p (p [R] q) = (\<not> \<pi> \<Turnstile>p (Not p [U] Not q))"
-  "\<pi> \<Turnstile>p (p [U] q) = (\<not> \<pi> \<Turnstile>p (Not p [R] Not q))"
-  apply (simp add: Release_def)
-  apply (simp add: Release_def)
+lemma execute_induct: "execute step' w w' \<Longrightarrow> (\<And>w. P w w) \<Longrightarrow> (\<And>w1 w2 w3. execute step' w1 w2 \<Longrightarrow> P w1 w2 \<Longrightarrow> execute_step step' w2 w3 \<Longrightarrow> P w1 w3) \<Longrightarrow> P w w'"
+  apply (simp add: execute_def)
+  apply (erule rtranclp_induct)
+   apply auto
   done
 
-lemma Globally_and_Finally:
-  "\<pi> \<Turnstile>p \<box>\<phi> = \<pi> \<Turnstile>p Not (\<diamondsuit> (Not \<phi>))"
-  unfolding Globally_def Finally_def
+lemma execute_imps_trace:
+  assumes "execute step' w w'"
+  obtains path where "execute_traced step' w w' path"
+  apply (induct rule: execute_induct)
+  apply (rule assms)
+  using execute_traced_empty apply blast
+  using execute_traced_cons by blast
+
+lemma trace_imps_execute:
+  assumes "execute_traced step' w w' path"
+  shows "execute step' w w'"
+  apply (rule execute_traced.induct)
+  apply (rule assms)
+  apply (simp add: execute_def)
+  by (simp add: execute_def)
+
+lemma execute_traced_coherence_0: "\<lbrakk> execute_traced step w w' path; length path = 0 \<rbrakk> \<Longrightarrow> w = w'"
+  apply (induct rule: execute_traced.induct)
+  apply simp
+  apply simp
+  done
+
+lemma execute_traced_coherence_Suc:
+  assumes "execute_traced step w w' path" "length path = Suc n"
+  obtains w0 path' where "path = path' @ [w0]" "execute_traced step w w0 path'" "execute_step step w0 w'" "length path' = n"
+  using assms
+  apply (induct arbitrary: rule: execute_traced.induct)
+  apply simp
+  apply simp
+  done
+
+lemma step_accepted_monotonic: "step proc st event = (st',ns) \<Longrightarrow> accepted st \<subseteq> accepted st'"
+  apply (cases proc)
+  apply auto
 proof-
-  have "\<pi> \<Turnstile>p Not (true [U] Not \<phi>) = (\<not> \<pi> \<Turnstile>p (true [U] Not \<phi>))"
-    by simp
-  also have "\<dots> = (\<pi> \<Turnstile>p (Not true [R] Not (Not \<phi>)))"
-    using path_until_release_iff(2) by blast
-  also have "\<dots> = (\<pi> \<Turnstile>p (false [R] \<phi>))"
-    by (simp add: false_def path_until_release_iff(1) true_def)
-  finally show "\<pi> \<Turnstile>p (false [R] \<phi>) = \<pi> \<Turnstile>p Prop.Not (true [U] Prop.Not \<phi>)" by simp
+  fix x1 x
+  assume hyp: "step (Worker x1) st event = (st', ns)" "proc = Worker x1" "x \<in> accepted st"
+  have "step (Worker x1) st event = (st',ns) \<Longrightarrow> accepted st \<subseteq> accepted st'"
+    apply (cases event)
+    apply auto
+  proof-
+    fix x11 x12 x
+    assume "(if Worker x1 = x11 then let (w, y) = worker_step (the (workers st x1)) (Sent x11 x12) in (st\<lparr>workers := workers st(x1 \<mapsto> w)\<rparr>, y) else (st, {})) = (st', ns)"
+      and "event = Sent x11 x12" "x \<in> accepted st"
+
+    have "
+       (if Worker x1 = x11 then let (w, y) = worker_step (the (workers st x1)) (Sent x11 x12) in (st\<lparr>workers := workers st(x1 \<mapsto> w)\<rparr>, y) else (st, {})) =
+       (st', ns) \<Longrightarrow>
+       event = Sent x11 x12 \<Longrightarrow> x \<in> accepted st \<Longrightarrow> x \<in> accepted st'"
+      apply (cases x11)
+      apply auto
+    proof-
+      fix x1a
+      show "(if x1 = x1a then let (w, y) = worker_step (the (workers st x1)) (Sent (Worker x1a) x12) in (st\<lparr>workers := workers st(x1 \<mapsto> w)\<rparr>, y) else (st, {})) =
+           (st', ns) \<Longrightarrow>
+           event = Sent (Worker x1a) x12 \<Longrightarrow> x \<in> accepted st \<Longrightarrow> x11 = Worker x1a \<Longrightarrow> x \<in> accepted st'"
+        apply (cases "x1 = x1a")
+        apply auto
+        apply (cases "worker_step (the (workers st x1a)) (Sent (Worker x1a) x12)")
+        apply auto
+        done
+    qed
+
+    show "x \<in> accepted st'"
+      by (simp add: \<open>(if Worker x1 = x11 then let (w, y) = worker_step (the (workers st x1)) (Sent x11 x12) in (st\<lparr>workers := workers st(x1 \<mapsto> w)\<rparr>, y) else (st, {})) = (st', ns)\<close> \<open>\<lbrakk>(if Worker x1 = x11 then let (w, y) = worker_step (the (workers st x1)) (Sent x11 x12) in (st\<lparr>workers := workers st(x1 \<mapsto> w)\<rparr>, y) else (st, {})) = (st', ns); event = Sent x11 x12; x \<in> accepted st\<rbrakk> \<Longrightarrow> x \<in> accepted st'\<close> \<open>event = Sent x11 x12\<close> \<open>x \<in> accepted st\<close>)
+  qed
+
+  show "x \<in> accepted st'"
+    using \<open>step (Worker x1) st event = (st', ns) \<Longrightarrow> accepted st \<subseteq> accepted st'\<close> hyp(1) hyp(3) by blast
+next
+  fix x
+  show "step Acceptor st event = (st', ns) \<Longrightarrow> proc = Acceptor \<Longrightarrow> x \<in> accepted st \<Longrightarrow> x \<in> accepted st'"
+    apply (cases event)
+    apply auto
+  proof-
+    fix x11 x12
+    show "step Acceptor st (Sent x11 x12) = (st', ns) \<Longrightarrow> proc = Acceptor \<Longrightarrow> x \<in> accepted st \<Longrightarrow> event = Sent x11 x12 \<Longrightarrow> x \<in> accepted st'"
+      apply (cases x12)
+      apply auto
+      done
+  qed
+qed
+
+lemma accepted_step_monotonic: "execute_step step (st,events,msgs) (st',events',msgs') \<Longrightarrow> accepted st \<subseteq> accepted st'"
+proof-
+  assume hyp: "execute_step step (st,events,msgs) (st',events',msgs')"
+  obtain proc event ns where
+    "valid_event event proc msgs"
+    "step proc st event = (st',ns)"
+    "events' = events @ [(proc,event)]"
+    "msgs' = msgs \<union> (\<lambda>msg. (proc,msg)) ` ns"
+    apply (rule execute_step.cases [OF hyp])
+    by blast
+  show ?thesis
+    using \<open>step proc st event = (st', ns)\<close> step_accepted_monotonic by blast
+qed
+
+lemma accepted_monotonic: "execute step (st :: 'val State,events,msgs) (st',events',msgs') \<Longrightarrow> accepted st \<subseteq> accepted st'"
+proof-
+  assume "execute step (st,events,msgs) (st',events',msgs')"
+  obtain path :: "'val world list" where "execute_traced step (st,events,msgs) (st',events',msgs') path"
+    using \<open>execute step (st, events, msgs) (st', events', msgs')\<close> execute_imps_trace by blast
+  {
+    fix n :: nat
+    have "\<lbrakk> length (path :: 'val world list) = n; execute_traced step (st :: 'val State,events,msgs) (st',events',msgs') path \<rbrakk> \<Longrightarrow> accepted st \<subseteq> accepted st'"
+      apply (induct n arbitrary: path st events msgs st' events' msgs')
+      using execute_traced_coherence_0 apply blast
+    proof-
+      fix n :: nat and path :: "'val world list" and st :: "'val State" and events msgs st' events' msgs'
+      assume hyp: "(\<And>(path :: 'val world list) st events msgs st' events' msgs'. length path = n \<Longrightarrow> execute_traced step (st, events, msgs) (st', events', msgs') path \<Longrightarrow> accepted st \<subseteq> accepted st')"
+        and "length path = Suc n" "execute_traced step (st, events, msgs) (st', events', msgs') path"
+      obtain w0 and path' :: "'val world list" where "path = path' @ [w0]" "execute_traced step (st,events,msgs) w0 path'" "execute_step step w0 (st',events',msgs')" "length path' = n"
+        using \<open>execute_traced step (st, events, msgs) (st', events', msgs') path\<close> \<open>length path = Suc n\<close> execute_traced_coherence_Suc by blast
+      obtain st'' events'' msgs'' where "w0 = (st'',events'',msgs'')"
+        using prod_cases3 by blast
+      have "accepted st \<subseteq> accepted st''"
+        using \<open>execute_traced step (st, events, msgs) w0 path'\<close> \<open>length path' = n\<close> \<open>w0 = (st'', events'', msgs'')\<close> hyp by auto
+      moreover have "accepted st'' \<subseteq> accepted st'"
+        using \<open>execute_step step w0 (st', events', msgs')\<close> \<open>w0 = (st'', events'', msgs'')\<close> accepted_step_monotonic by blast
+      ultimately show "accepted st \<subseteq> accepted st'"
+        by simp
+    qed
+  }
+  thus ?thesis
+    using \<open>execute_traced step (st, events, msgs) (st', events', msgs') path\<close> by blast
 qed
 
 end
