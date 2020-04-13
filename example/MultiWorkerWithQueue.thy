@@ -203,10 +203,105 @@ proof-
     using \<open>execute_traced step (st, events, msgs) (st', events', msgs') path\<close> by blast
 qed
 
+definition initialState :: "nat \<Rightarrow> 'val State" where
+  "initialState W \<equiv> \<lparr> workers = map_of (map (\<lambda>i. (i, \<lparr> alive = True, process = [] \<rparr>)) (map nat [0..int W])), accepted = {}, queue = initialSQSState \<rparr>"
+
+definition initialWorld :: "nat \<Rightarrow> 'val world" where
+  "initialWorld W \<equiv> (initialState W, [], {})"
+
+lemma worker_step_wont_change_accepted:
+  "step (Worker w) st event = (st',ns) \<Longrightarrow> accepted st' = accepted st"
+  apply (cases event)
+  apply simp_all
+proof-
+  fix x11 x12
+  show "(if Worker w = x11 then let (wa, y) = worker_step (the (workers st w)) (Received x11 x12) in (st\<lparr>workers := workers st(w \<mapsto> wa)\<rparr>, y) else (st, {})) =
+       (st', ns) \<Longrightarrow>
+       event = Received x11 x12 \<Longrightarrow> accepted st' = accepted st"
+    apply (cases "Worker w = x11")
+    apply simp_all
+    apply (cases "worker_step (the (workers st w)) (Received x11 x12)")
+    apply simp
+    apply (cases st, cases st')
+    apply simp
+    done
+qed
+
+lemma step_accepted_change_onlyif:
+  assumes "step proc st event = (st', ns)" "val \<in> accepted st' - accepted st"
+  obtains r s val where "event = Received r (Send s (Accept val))"
+  using assms
+  apply (cases event)
+  apply simp_all
+  apply (cases proc)
+  apply simp_all
+  using assms(1) worker_step_wont_change_accepted apply blast
+  by (metis Message.exhaust Send.exhaust prod.inject step.simps(4) step.simps(5))
+
+lemma execute_step_accepted_change_onlyif:
+  assumes "execute_step step (st,events,msgs) (st',events',msgs')" "val \<in> accepted st' - accepted st"
+  obtains p r s where "events' = event @ [(p, Received r (Send s (Accept val)))]"
+  using assms
+  apply (cases rule: execute_step.cases)
+  by (metis DiffD1 DiffD2 Event.simps(3) step_accepted_change_onlyif valid_event.elims(2) worker_step_wont_change_accepted)
+
+lemma execute_step_backward_Accept:
+  assumes "execute step (initialWorld W) (st',events',msgs')" "val \<in> accepted st'"
+  obtains p r s where "(p, Received r (Send s (Accept val))) \<in> set events'"
+proof-
+  obtain path where "execute_traced step (initialWorld W) (st',events',msgs') path"
+    using assms(1) execute_imps_trace by blast
+  { fix n
+    have "\<lbrakk> length path = n; execute_traced step (initialWorld W) (st',events',msgs') path; val \<in> accepted st' \<rbrakk> \<Longrightarrow> \<exists>p r s. (p, Received r (Send s (Accept val))) \<in> set events'"
+      apply (induct n arbitrary: path st' events' msgs')
+    proof-
+      fix path st' events' msgs'
+      assume "length path = 0"
+        and "execute_traced step (initialWorld W) (st',events',msgs') path"
+        and "val \<in> accepted st'"
+      have "(st',events',msgs') = initialWorld W"
+        using \<open>execute_traced step (initialWorld W) (st', events', msgs') path\<close> \<open>length path = 0\<close> execute_traced_coherence_0 by fastforce
+      hence "accepted st' = {}"
+        by (simp add: initialWorld_def initialState_def)
+      show "\<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set events'"
+        using \<open>accepted st' = {}\<close> \<open>val \<in> accepted st'\<close> by blast
+    next
+      fix n path st' events' msgs'
+      assume "(\<And>path st' events' msgs'.
+           length path = n \<Longrightarrow>
+           execute_traced step (initialWorld W) (st', events', msgs') path \<Longrightarrow>
+           val \<in> accepted st' \<Longrightarrow> \<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set events')"
+        and "length path = Suc n" "execute_traced step (initialWorld W) (st', events', msgs') path" "val \<in> accepted st'"
+      obtain w' path' where "path = path' @ [w']" "length path' = n" "execute_traced step (initialWorld W) w' path'" "execute_step step w' (st',events',msgs')"
+        using \<open>execute_traced step (initialWorld W) (st', events', msgs') path\<close> \<open>length path = Suc n\<close> execute_traced_coherence_Suc by blast
+      obtain st events msgs where "w' = (st,events,msgs)"
+        using prod_cases3 by blast
+      have "accepted st \<subseteq> accepted st'"
+        using \<open>execute_step step w' (st', events', msgs')\<close> \<open>w' = (st, events, msgs)\<close> accepted_step_monotonic by blast
+      have "val \<in> accepted st \<or> val \<in> accepted st' - accepted st"
+        using \<open>val \<in> accepted st'\<close> by blast
+      moreover have "val \<in> accepted st \<Longrightarrow> \<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set events'"
+        using \<open>\<And>st' path msgs' events'. \<lbrakk>length path = n; execute_traced step (initialWorld W) (st', events', msgs') path; val \<in> accepted st'\<rbrakk> \<Longrightarrow> \<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set events'\<close> \<open>execute_traced step (initialWorld W) w' path'\<close> \<open>length path' = n\<close> \<open>w' = (st, events, msgs)\<close> by blast
+      moreover have "val \<in> accepted st' - accepted st \<Longrightarrow> \<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set events'"
+      proof-
+        assume "val \<in> accepted st' - accepted st"
+        have "execute_step step (st,events,msgs) (st',events',msgs')"
+          using \<open>execute_step step w' (st', events', msgs')\<close> \<open>w' = (st, events, msgs)\<close> by blast
+        obtain p r s where "events' = events @ [(p, Received r (Send s (Accept val)))]"
+          by (meson \<open>execute_step step (st, events, msgs) (st', events', msgs')\<close> \<open>val \<in> accepted st' - accepted st\<close> execute_step_accepted_change_onlyif)
+        show ?thesis
+          using \<open>events' = events @ [(p, Received r (Send.Send s (Accept val)))]\<close> by auto
+      qed
+      ultimately show "\<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set events'"
+        by blast
+    qed
+  }
+  thus ?thesis
+    using \<open>execute_traced step (initialWorld W) (st', events', msgs') path\<close> assms(2) that by auto
+qed
+
 theorem liveness:
-  fixes W :: nat
-  assumes "st0 = \<lparr> workers = map_of (map (\<lambda>i. (i, \<lparr> alive = True, process = [] \<rparr>)) (map nat [0..int W])), accepted = {}, queue = initialSQSState \<rparr>"
-  and "execute step (st0,[],{}) w"
+  assumes "execute step (initialWorld W) w"
   obtains w' where "execute step w w'" "ran (messages (SQS.queue (queue ((\<lambda>(a,b,c). a) w')))) = {}" "accepted ((\<lambda>(a,b,c). a) w') = {0..W}"
   sorry
 
