@@ -29,7 +29,7 @@ datatype 'msg Event
   | QueueStep
 
 fun valid_event :: "(Node, 'val Message) Send Event \<Rightarrow> Node \<Rightarrow> (Node \<times> (Node, 'val Message) Send) set \<Rightarrow> bool" where
-  "valid_event (Received sender (Send recp msg)) (Worker w) msgs = ((recp = Worker w) \<and> ((sender, (Send recp msg)) \<in> msgs))"
+  "valid_event (Received sender msg) _ msgs = ((sender, msg) \<in> msgs)"
 | "valid_event WorkerStep _ _ = True"
 | "valid_event _ _ _ = False"
 
@@ -37,7 +37,9 @@ type_synonym ('st, 'val) StepStateFunction = "'st \<Rightarrow> (Node, 'val Mess
 type_synonym 'val StepFunction = "Node \<Rightarrow> ('val State, 'val) StepStateFunction"
 
 fun worker_step :: "('val WorkerState, 'val) StepStateFunction" where
-  "worker_step st WorkerStep = (st \<lparr> process := tl (process st) \<rparr>, {Send Acceptor (Accept (snd (hd (process st)))), Send Queue (SQSRequest (Delete (fst (hd (process st)))))})"
+  "worker_step st WorkerStep = (if List.null (process st)
+    then (st, {Send Queue (SQSRequest (Receive 10))})
+    else (st \<lparr> process := tl (process st) \<rparr>, {Send Acceptor (Accept (snd (hd (process st)))), Send Queue (SQSRequest (Delete (fst (hd (process st)))))}))"
 | "worker_step st (Received _ (Send _ (SQSResponse (Returned xs)))) = (st \<lparr> process := xs \<rparr>, {})"
 | "worker_step st _ = (st, {})"
 
@@ -223,21 +225,30 @@ qed
 
 lemma step_accepted_change_onlyif:
   assumes "step proc st event = (st', ns)" "val \<in> accepted st' - accepted st"
-  obtains r s val where "event = Received r (Send s (Accept val))"
+  obtains r s where "event = Received r (Send s (Accept val))"
   using assms
   apply (cases event)
   apply simp_all
   apply (cases proc)
   apply simp_all
   using assms(1) worker_step_wont_change_accepted apply blast
-  by (metis Message.exhaust Send.exhaust prod.inject step.simps(4) step.simps(5))
+proof-
+  fix x11 x12
+  show "(\<And>r s. x11 = r \<and> x12 = Send.Send s (Accept val) \<Longrightarrow> thesis) \<Longrightarrow>
+       step Acceptor st (Received x11 x12) = (st', ns) \<Longrightarrow> val \<in> accepted st' \<and> val \<notin> accepted st \<Longrightarrow> event = Received x11 x12 \<Longrightarrow> proc = Acceptor \<Longrightarrow> thesis"
+    apply (cases x12)
+    apply (cases "send_payload x12")
+    apply auto
+    done
+qed
 
 lemma execute_step_accepted_change_onlyif:
   assumes "execute_step step w w'" "val \<in> accepted (world_state w') - accepted (world_state w)"
   obtains p r s where "world_events w' = world_events w @ [(p, Received r (Send s (Accept val)))]"
   using assms
   apply (cases rule: execute_step.cases)
-  by (metis DiffD1 DiffD2 step.simps(8) valid_event.elims(2) worker_step_wont_change_accepted world.select_convs(1))
+  apply simp
+  by (meson Diff_iff step_accepted_change_onlyif)
 
 lemma execute_step_events_increasing_as_set:
   assumes "execute_step step w w'"
@@ -306,6 +317,14 @@ proof-
   thus ?thesis
     using \<open>execute_traced step (initialWorld W) w' path\<close> assms(2) that by blast
 qed
+
+(*
+lemma exists_consume_queue_tasks_execution:
+  obtains w' df xs where
+    "execute step w w'"
+    "world_events w' = world_events w @ df"
+    "map snd df = Received (Worker 0) (SQSRequest (Receive 1)) # Received Queue (Send (Worker 0) (SQSResponse (Returned xs))) # []"
+*)
 
 theorem liveness:
   assumes "execute step (initialWorld W) w"
