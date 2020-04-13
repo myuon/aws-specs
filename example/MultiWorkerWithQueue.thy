@@ -14,7 +14,7 @@ datatype 'val Message
 
 record 'val WorkerState =
   alive :: bool
-  process :: "'val list"
+  process :: "(MessageId \<times> 'val) list"
 
 record 'val State =
   workers :: "nat \<rightharpoonup> 'val WorkerState"
@@ -37,8 +37,8 @@ type_synonym ('st, 'val) StepStateFunction = "'st \<Rightarrow> (Node, 'val Mess
 type_synonym 'val StepFunction = "Node \<Rightarrow> ('val State, 'val) StepStateFunction"
 
 fun worker_step :: "('val WorkerState, 'val) StepStateFunction" where
-  "worker_step st WorkerStep = (st \<lparr> process := tl (process st) \<rparr>, {Send Acceptor (Accept (hd (process st)))})"
-| "worker_step st (Received _ (Send _ (SQSResponse (Returned xs)))) = (st \<lparr> process := map snd xs \<rparr>, {})"
+  "worker_step st WorkerStep = (st \<lparr> process := tl (process st) \<rparr>, {Send Acceptor (Accept (snd (hd (process st)))), Send Queue (SQSRequest (Delete (fst (hd (process st)))))})"
+| "worker_step st (Received _ (Send _ (SQSResponse (Returned xs)))) = (st \<lparr> process := xs \<rparr>, {})"
 | "worker_step st _ = (st, {})"
 
 fun queue_step :: "((Node, 'val) SQSState, 'val) StepStateFunction" where
@@ -203,11 +203,11 @@ proof-
     using \<open>execute_traced step (st, events, msgs) (st', events', msgs') path\<close> by blast
 qed
 
-theorem completed:
+theorem liveness:
   fixes W :: nat
   assumes "st0 = \<lparr> workers = map_of (map (\<lambda>i. (i, \<lparr> alive = True, process = [] \<rparr>)) (map nat [0..int W])), accepted = {}, queue = initialSQSState \<rparr>"
   and "execute step (st0,[],{}) w"
-  obtains w' where "execute step w w'"
+  obtains w' where "execute step w w'" "ran (messages (SQS.queue (queue ((\<lambda>(a,b,c). a) w')))) = {}" "accepted ((\<lambda>(a,b,c). a) w') = {0..W}"
   sorry
 
 end
