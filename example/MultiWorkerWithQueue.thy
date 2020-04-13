@@ -19,31 +19,43 @@ record 'val WorkerState =
 record 'val State =
   workers :: "nat \<rightharpoonup> 'val WorkerState"
   accepted :: "'val set"
+  queue :: "(Node, 'val) SQSState"
 
-datatype ('proc, 'msg) Event
-  = Sent 'proc 'msg
+datatype ('proc,'msg) Send = Send (msg_recipient: 'proc) (send_payload: 'msg)
+
+datatype 'msg Event
+  = Received (msg_sender: Node) (received_message: 'msg)
   | WorkerStep
+  | QueueStep
 
-fun valid_event :: "(Node, 'val Message) Event \<Rightarrow> Node \<Rightarrow> (Node \<times> 'val Message) set \<Rightarrow> bool" where
-  "valid_event (Sent sender msg) (Worker _) msgs = ((sender, msg) \<in> msgs)"
+fun valid_event :: "(Node, 'val Message) Send Event \<Rightarrow> Node \<Rightarrow> (Node \<times> (Node, 'val Message) Send) set \<Rightarrow> bool" where
+  "valid_event (Received sender (Send recp msg)) (Worker w) msgs = ((recp = Worker w) \<and> ((sender, (Send recp msg)) \<in> msgs))"
 | "valid_event WorkerStep _ _ = True"
 | "valid_event _ _ _ = False"
 
-type_synonym 'val StepFunction = "Node \<Rightarrow> 'val State \<Rightarrow> (Node, 'val Message) Event \<Rightarrow> ('val State \<times> 'val Message set)" 
+type_synonym ('st, 'val) StepStateFunction = "'st \<Rightarrow> (Node, 'val Message) Send Event \<Rightarrow> ('st \<times> (Node, 'val Message) Send set)" 
+type_synonym 'val StepFunction = "Node \<Rightarrow> ('val State, 'val) StepStateFunction"
 
-fun worker_step :: "'val WorkerState \<Rightarrow> (Node, 'val Message) Event \<Rightarrow> ('val WorkerState \<times> 'val Message set)" where
-  "worker_step st WorkerStep = (st \<lparr> process := tl (process st) \<rparr>, {Accept (hd (process st))})"
-| "worker_step st (Sent _ (SQSResponse (Returned xs))) = (st \<lparr> process := map snd xs \<rparr>, {})"
+fun worker_step :: "('val WorkerState, 'val) StepStateFunction" where
+  "worker_step st WorkerStep = (st \<lparr> process := tl (process st) \<rparr>, {Send Acceptor (Accept (hd (process st)))})"
+| "worker_step st (Received _ (Send _ (SQSResponse (Returned xs)))) = (st \<lparr> process := map snd xs \<rparr>, {})"
 | "worker_step st _ = (st, {})"
 
+fun queue_step :: "((Node, 'val) SQSState, 'val) StepStateFunction" where
+  "queue_step st (Received proc (Send _ (SQSRequest req))) = (st \<lparr> request := Some (proc,req) \<rparr>, {})"
+| "queue_step st QueueStep = (let st' = SQS_step st in (st', case response st' of None \<Rightarrow> {} | Some (proc,resp) \<Rightarrow> {Send proc (SQSResponse resp)}))"
+| "queue_step st _ = (st, {})"
+
 fun step :: "'val StepFunction" where
-  "step (Worker proc) st (Sent target msg) =
-    (if Worker proc = target then (let (w, ms) = worker_step (the (workers st proc)) (Sent target msg) in (st \<lparr> workers := workers st (proc \<mapsto> w) \<rparr>, ms)) else (st, {}))
+  "step (Worker proc) st (Received target msg) =
+    (if Worker proc = target then (let (w, ms) = worker_step (the (workers st proc)) (Received target msg) in (st \<lparr> workers := workers st (proc \<mapsto> w) \<rparr>, ms)) else (st, {}))
   "
-| "step Acceptor st (Sent _ (Accept val)) = (st \<lparr> accepted := accepted st \<union> {val} \<rparr>, {})"
+| "step Acceptor st (Received _ (Send _ (Accept val))) = (st \<lparr> accepted := accepted st \<union> {val} \<rparr>, {})"
 | "step _ st _ = (st, {})"
 
-inductive execute_step where
+type_synonym 'val world = "'val State \<times> (Node \<times> (Node, 'val Message) Send Event) list \<times> (Node \<times> (Node, 'val Message) Send) set"
+
+inductive execute_step :: "'val StepFunction \<Rightarrow> 'val world \<Rightarrow> 'val world \<Rightarrow> bool" where
   exec_step: "\<lbrakk> valid_event event proc msgs;
     step' proc st event = (st', ns);
     events' = events @ [(proc, event)];
@@ -52,8 +64,6 @@ inductive execute_step where
 
 definition execute where
   "execute step' \<equiv> rtranclp (execute_step step')"
-
-type_synonym 'val world = "'val State \<times> (Node \<times> (Node, 'val Message) Event) list \<times> (Node \<times> 'val Message) set"
 
 inductive execute_traced :: "'val StepFunction \<Rightarrow> 'val world \<Rightarrow> 'val world \<Rightarrow> 'val world list \<Rightarrow> bool" where
   execute_traced_empty: "execute_traced step' w w []"
@@ -107,29 +117,29 @@ proof-
     apply auto
   proof-
     fix x11 x12 x
-    assume "(if Worker x1 = x11 then let (w, y) = worker_step (the (workers st x1)) (Sent x11 x12) in (st\<lparr>workers := workers st(x1 \<mapsto> w)\<rparr>, y) else (st, {})) = (st', ns)"
-      and "event = Sent x11 x12" "x \<in> accepted st"
+    assume "(if Worker x1 = x11 then let (w, y) = worker_step (the (workers st x1)) (Received x11 x12) in (st\<lparr>workers := workers st(x1 \<mapsto> w)\<rparr>, y) else (st, {})) = (st', ns)"
+      and "event = Received x11 x12" "x \<in> accepted st"
 
     have "
-       (if Worker x1 = x11 then let (w, y) = worker_step (the (workers st x1)) (Sent x11 x12) in (st\<lparr>workers := workers st(x1 \<mapsto> w)\<rparr>, y) else (st, {})) =
+       (if Worker x1 = x11 then let (w, y) = worker_step (the (workers st x1)) (Received x11 x12) in (st\<lparr>workers := workers st(x1 \<mapsto> w)\<rparr>, y) else (st, {})) =
        (st', ns) \<Longrightarrow>
-       event = Sent x11 x12 \<Longrightarrow> x \<in> accepted st \<Longrightarrow> x \<in> accepted st'"
+       event = Received x11 x12 \<Longrightarrow> x \<in> accepted st \<Longrightarrow> x \<in> accepted st'"
       apply (cases x11)
       apply auto
     proof-
       fix x1a
-      show "(if x1 = x1a then let (w, y) = worker_step (the (workers st x1)) (Sent (Worker x1a) x12) in (st\<lparr>workers := workers st(x1 \<mapsto> w)\<rparr>, y) else (st, {})) =
+      show "(if x1 = x1a then let (w, y) = worker_step (the (workers st x1)) (Received (Worker x1a) x12) in (st\<lparr>workers := workers st(x1 \<mapsto> w)\<rparr>, y) else (st, {})) =
            (st', ns) \<Longrightarrow>
-           event = Sent (Worker x1a) x12 \<Longrightarrow> x \<in> accepted st \<Longrightarrow> x11 = Worker x1a \<Longrightarrow> x \<in> accepted st'"
+           event = Received (Worker x1a) x12 \<Longrightarrow> x \<in> accepted st \<Longrightarrow> x11 = Worker x1a \<Longrightarrow> x \<in> accepted st'"
         apply (cases "x1 = x1a")
         apply auto
-        apply (cases "worker_step (the (workers st x1a)) (Sent (Worker x1a) x12)")
+        apply (cases "worker_step (the (workers st x1a)) (Received (Worker x1a) x12)")
         apply auto
         done
     qed
 
     show "x \<in> accepted st'"
-      by (simp add: \<open>(if Worker x1 = x11 then let (w, y) = worker_step (the (workers st x1)) (Sent x11 x12) in (st\<lparr>workers := workers st(x1 \<mapsto> w)\<rparr>, y) else (st, {})) = (st', ns)\<close> \<open>\<lbrakk>(if Worker x1 = x11 then let (w, y) = worker_step (the (workers st x1)) (Sent x11 x12) in (st\<lparr>workers := workers st(x1 \<mapsto> w)\<rparr>, y) else (st, {})) = (st', ns); event = Sent x11 x12; x \<in> accepted st\<rbrakk> \<Longrightarrow> x \<in> accepted st'\<close> \<open>event = Sent x11 x12\<close> \<open>x \<in> accepted st\<close>)
+      by (simp add: \<open>(if Worker x1 = x11 then let (w, y) = worker_step (the (workers st x1)) (Received x11 x12) in (st\<lparr>workers := workers st(x1 \<mapsto> w)\<rparr>, y) else (st, {})) = (st', ns)\<close> \<open>\<lbrakk>(if Worker x1 = x11 then let (w, y) = worker_step (the (workers st x1)) (Received x11 x12) in (st\<lparr>workers := workers st(x1 \<mapsto> w)\<rparr>, y) else (st, {})) = (st', ns); event = Received x11 x12; x \<in> accepted st\<rbrakk> \<Longrightarrow> x \<in> accepted st'\<close> \<open>event = Received x11 x12\<close> \<open>x \<in> accepted st\<close>)
   qed
 
   show "x \<in> accepted st'"
@@ -141,8 +151,9 @@ next
     apply auto
   proof-
     fix x11 x12
-    show "step Acceptor st (Sent x11 x12) = (st', ns) \<Longrightarrow> proc = Acceptor \<Longrightarrow> x \<in> accepted st \<Longrightarrow> event = Sent x11 x12 \<Longrightarrow> x \<in> accepted st'"
+    show "step Acceptor st (Received x11 x12) = (st', ns) \<Longrightarrow> proc = Acceptor \<Longrightarrow> x \<in> accepted st \<Longrightarrow> event = Received x11 x12 \<Longrightarrow> x \<in> accepted st'"
       apply (cases x12)
+      apply (cases "send_payload x12")
       apply auto
       done
   qed
@@ -191,5 +202,12 @@ proof-
   thus ?thesis
     using \<open>execute_traced step (st, events, msgs) (st', events', msgs') path\<close> by blast
 qed
+
+theorem completed:
+  fixes W :: nat
+  assumes "st0 = \<lparr> workers = map_of (map (\<lambda>i. (i, \<lparr> alive = True, process = [] \<rparr>)) (map nat [0..int W])), accepted = {}, queue = initialSQSState \<rparr>"
+  and "execute step (st0,[],{}) w"
+  obtains w' where "execute step w w'"
+  sorry
 
 end
