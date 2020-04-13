@@ -53,14 +53,17 @@ fun step :: "'val StepFunction" where
 | "step Acceptor st (Received _ (Send _ (Accept val))) = (st \<lparr> accepted := accepted st \<union> {val} \<rparr>, {})"
 | "step _ st _ = (st, {})"
 
-type_synonym 'val world = "'val State \<times> (Node \<times> (Node, 'val Message) Send Event) list \<times> (Node \<times> (Node, 'val Message) Send) set"
+record 'val world =
+  world_state :: "'val State"
+  world_events :: "(Node \<times> (Node, 'val Message) Send Event) list"
+  world_messages :: "(Node \<times> (Node, 'val Message) Send) set"
 
 inductive execute_step :: "'val StepFunction \<Rightarrow> 'val world \<Rightarrow> 'val world \<Rightarrow> bool" where
   exec_step: "\<lbrakk> valid_event event proc msgs;
     step' proc st event = (st', ns);
     events' = events @ [(proc, event)];
     msgs' = msgs \<union> (\<lambda>msg. (proc,msg)) ` ns
-  \<rbrakk> \<Longrightarrow> execute_step step' (st,events,msgs) (st',events',msgs')"
+  \<rbrakk> \<Longrightarrow> execute_step step' \<lparr> world_state = st, world_events = events, world_messages = msgs \<rparr> \<lparr> world_state = st', world_events = events', world_messages = msgs' \<rparr>"
 
 definition execute where
   "execute step' \<equiv> rtranclp (execute_step step')"
@@ -159,55 +162,46 @@ next
   qed
 qed
 
-lemma accepted_step_monotonic: "execute_step step (st,events,msgs) (st',events',msgs') \<Longrightarrow> accepted st \<subseteq> accepted st'"
-proof-
-  assume hyp: "execute_step step (st,events,msgs) (st',events',msgs')"
-  obtain proc event ns where
-    "valid_event event proc msgs"
-    "step proc st event = (st',ns)"
-    "events' = events @ [(proc,event)]"
-    "msgs' = msgs \<union> (\<lambda>msg. (proc,msg)) ` ns"
-    apply (rule execute_step.cases [OF hyp])
-    by blast
-  show ?thesis
-    using \<open>step proc st event = (st', ns)\<close> step_accepted_monotonic by blast
-qed
+lemma accepted_step_monotonic: "execute_step step w w' \<Longrightarrow> accepted (world_state w) \<subseteq> accepted (world_state w')"
+  apply (erule execute_step.cases)
+  apply simp
+  using step_accepted_monotonic by blast
 
-lemma accepted_monotonic: "execute step (st :: 'val State,events,msgs) (st',events',msgs') \<Longrightarrow> accepted st \<subseteq> accepted st'"
+lemma accepted_monotonic:
+  fixes w :: "'val world"
+  shows "execute step w w' \<Longrightarrow> accepted (world_state w) \<subseteq> accepted (world_state w')"
 proof-
-  assume "execute step (st,events,msgs) (st',events',msgs')"
-  obtain path :: "'val world list" where "execute_traced step (st,events,msgs) (st',events',msgs') path"
-    using \<open>execute step (st, events, msgs) (st', events', msgs')\<close> execute_imps_trace by blast
+  assume "execute step w w'"
+  obtain path where "execute_traced step w w' path"
+    using \<open>execute step w w'\<close> execute_imps_trace by blast
   {
     fix n :: nat
-    have "\<lbrakk> length (path :: 'val world list) = n; execute_traced step (st :: 'val State,events,msgs) (st',events',msgs') path \<rbrakk> \<Longrightarrow> accepted st \<subseteq> accepted st'"
-      apply (induct n arbitrary: path st events msgs st' events' msgs')
+    have "\<lbrakk> length path = n; execute_traced step w w' path \<rbrakk> \<Longrightarrow> accepted (world_state w) \<subseteq> accepted (world_state w')"
+      apply (induct n arbitrary: path w w')
       using execute_traced_coherence_0 apply blast
     proof-
-      fix n :: nat and path :: "'val world list" and st :: "'val State" and events msgs st' events' msgs'
-      assume hyp: "(\<And>(path :: 'val world list) st events msgs st' events' msgs'. length path = n \<Longrightarrow> execute_traced step (st, events, msgs) (st', events', msgs') path \<Longrightarrow> accepted st \<subseteq> accepted st')"
-        and "length path = Suc n" "execute_traced step (st, events, msgs) (st', events', msgs') path"
-      obtain w0 and path' :: "'val world list" where "path = path' @ [w0]" "execute_traced step (st,events,msgs) w0 path'" "execute_step step w0 (st',events',msgs')" "length path' = n"
-        using \<open>execute_traced step (st, events, msgs) (st', events', msgs') path\<close> \<open>length path = Suc n\<close> execute_traced_coherence_Suc by blast
-      obtain st'' events'' msgs'' where "w0 = (st'',events'',msgs'')"
-        using prod_cases3 by blast
-      have "accepted st \<subseteq> accepted st''"
-        using \<open>execute_traced step (st, events, msgs) w0 path'\<close> \<open>length path' = n\<close> \<open>w0 = (st'', events'', msgs'')\<close> hyp by auto
-      moreover have "accepted st'' \<subseteq> accepted st'"
-        using \<open>execute_step step w0 (st', events', msgs')\<close> \<open>w0 = (st'', events'', msgs'')\<close> accepted_step_monotonic by blast
-      ultimately show "accepted st \<subseteq> accepted st'"
+      fix n :: nat and path :: "'val world list" and w w'
+      assume hyp: "(\<And>(path :: 'val world list) w w'. length path = n \<Longrightarrow> execute_traced step w w' path \<Longrightarrow> accepted (world_state w) \<subseteq> accepted (world_state w'))"
+        and "length path = Suc n" "execute_traced step w w' path"
+      obtain w0 :: "'val world" and path' where "path = path' @ [w0]" "execute_traced step w w0 path'" "execute_step step w0 w'" "length path' = n"
+        using \<open>execute_traced step w w' path\<close> \<open>length path = Suc n\<close> execute_traced_coherence_Suc by blast
+      have "accepted (world_state w) \<subseteq> accepted (world_state w0)"
+        using \<open>execute_traced step w w0 path'\<close> \<open>length path' = n\<close> hyp by auto
+      moreover have "accepted (world_state w0) \<subseteq> accepted (world_state w')"
+        by (simp add: \<open>execute_step step w0 w'\<close> accepted_step_monotonic)
+      ultimately show "accepted (world_state w) \<subseteq> accepted (world_state w')"
         by simp
     qed
   }
   thus ?thesis
-    using \<open>execute_traced step (st, events, msgs) (st', events', msgs') path\<close> by blast
+    using \<open>execute_traced step w w' path\<close> by blast
 qed
 
 definition initialState :: "nat \<Rightarrow> 'val State" where
   "initialState W \<equiv> \<lparr> workers = map_of (map (\<lambda>i. (i, \<lparr> alive = True, process = [] \<rparr>)) (map nat [0..int W])), accepted = {}, queue = initialSQSState \<rparr>"
 
 definition initialWorld :: "nat \<Rightarrow> 'val world" where
-  "initialWorld W \<equiv> (initialState W, [], {})"
+  "initialWorld W \<equiv> \<lparr> world_state = initialState W, world_events = [], world_messages = {} \<rparr>"
 
 lemma worker_step_wont_change_accepted:
   "step (Worker w) st event = (st',ns) \<Longrightarrow> accepted st' = accepted st"
@@ -239,70 +233,83 @@ lemma step_accepted_change_onlyif:
   by (metis Message.exhaust Send.exhaust prod.inject step.simps(4) step.simps(5))
 
 lemma execute_step_accepted_change_onlyif:
-  assumes "execute_step step (st,events,msgs) (st',events',msgs')" "val \<in> accepted st' - accepted st"
-  obtains p r s where "events' = event @ [(p, Received r (Send s (Accept val)))]"
+  assumes "execute_step step w w'" "val \<in> accepted (world_state w') - accepted (world_state w)"
+  obtains p r s where "world_events w' = world_events w @ [(p, Received r (Send s (Accept val)))]"
   using assms
   apply (cases rule: execute_step.cases)
-  by (metis DiffD1 DiffD2 Event.simps(3) step_accepted_change_onlyif valid_event.elims(2) worker_step_wont_change_accepted)
+  by (metis DiffD1 DiffD2 step.simps(8) valid_event.elims(2) worker_step_wont_change_accepted world.select_convs(1))
+
+lemma execute_step_events_increasing_as_set:
+  assumes "execute_step step w w'"
+  shows "set (world_events w) \<subseteq> set (world_events w')"
+  using assms
+  apply (cases rule: execute_step.cases)
+  apply auto
+  done
 
 lemma execute_step_backward_Accept:
-  assumes "execute step (initialWorld W) (st',events',msgs')" "val \<in> accepted st'"
-  obtains p r s where "(p, Received r (Send s (Accept val))) \<in> set events'"
+  assumes "execute step (initialWorld W) w'" "val \<in> accepted (world_state w')"
+  obtains p r s where "(p, Received r (Send s (Accept val))) \<in> set (world_events w')"
 proof-
-  obtain path where "execute_traced step (initialWorld W) (st',events',msgs') path"
+  obtain path where "execute_traced step (initialWorld W) w' path"
     using assms(1) execute_imps_trace by blast
   { fix n
-    have "\<lbrakk> length path = n; execute_traced step (initialWorld W) (st',events',msgs') path; val \<in> accepted st' \<rbrakk> \<Longrightarrow> \<exists>p r s. (p, Received r (Send s (Accept val))) \<in> set events'"
-      apply (induct n arbitrary: path st' events' msgs')
+    have "\<lbrakk> length path = n; execute_traced step (initialWorld W) w' path; val \<in> accepted (world_state w') \<rbrakk> \<Longrightarrow> \<exists>p r s. (p, Received r (Send s (Accept val))) \<in> set (world_events w')"
+      apply (induct n arbitrary: path w')
     proof-
-      fix path st' events' msgs'
+      fix path w'
       assume "length path = 0"
-        and "execute_traced step (initialWorld W) (st',events',msgs') path"
-        and "val \<in> accepted st'"
-      have "(st',events',msgs') = initialWorld W"
-        using \<open>execute_traced step (initialWorld W) (st', events', msgs') path\<close> \<open>length path = 0\<close> execute_traced_coherence_0 by fastforce
-      hence "accepted st' = {}"
+        and "execute_traced step (initialWorld W) w' path"
+        and "val \<in> accepted (world_state w')"
+      have "w' = initialWorld W"
+        using \<open>execute_traced step (initialWorld W) w' path\<close> \<open>length path = 0\<close> execute_traced_coherence_0 by fastforce
+      hence "accepted (world_state w') = {}"
         by (simp add: initialWorld_def initialState_def)
-      show "\<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set events'"
-        using \<open>accepted st' = {}\<close> \<open>val \<in> accepted st'\<close> by blast
+      show "\<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set (world_events w')"
+        using \<open>accepted (world_state w') = {}\<close> \<open>val \<in> accepted (world_state w')\<close> by blast
     next
-      fix n path st' events' msgs'
-      assume "(\<And>path st' events' msgs'.
+      fix n path w'
+      assume "(\<And>path w'.
            length path = n \<Longrightarrow>
-           execute_traced step (initialWorld W) (st', events', msgs') path \<Longrightarrow>
-           val \<in> accepted st' \<Longrightarrow> \<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set events')"
-        and "length path = Suc n" "execute_traced step (initialWorld W) (st', events', msgs') path" "val \<in> accepted st'"
-      obtain w' path' where "path = path' @ [w']" "length path' = n" "execute_traced step (initialWorld W) w' path'" "execute_step step w' (st',events',msgs')"
-        using \<open>execute_traced step (initialWorld W) (st', events', msgs') path\<close> \<open>length path = Suc n\<close> execute_traced_coherence_Suc by blast
-      obtain st events msgs where "w' = (st,events,msgs)"
-        using prod_cases3 by blast
-      have "accepted st \<subseteq> accepted st'"
-        using \<open>execute_step step w' (st', events', msgs')\<close> \<open>w' = (st, events, msgs)\<close> accepted_step_monotonic by blast
-      have "val \<in> accepted st \<or> val \<in> accepted st' - accepted st"
-        using \<open>val \<in> accepted st'\<close> by blast
-      moreover have "val \<in> accepted st \<Longrightarrow> \<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set events'"
-        using \<open>\<And>st' path msgs' events'. \<lbrakk>length path = n; execute_traced step (initialWorld W) (st', events', msgs') path; val \<in> accepted st'\<rbrakk> \<Longrightarrow> \<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set events'\<close> \<open>execute_traced step (initialWorld W) w' path'\<close> \<open>length path' = n\<close> \<open>w' = (st, events, msgs)\<close> by blast
-      moreover have "val \<in> accepted st' - accepted st \<Longrightarrow> \<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set events'"
+           execute_traced step (initialWorld W) w' path \<Longrightarrow>
+           val \<in> accepted (world_state w') \<Longrightarrow> \<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set (world_events w'))"
+        and "length path = Suc n" "execute_traced step (initialWorld W) w' path" "val \<in> accepted (world_state w')"
+      obtain w'' path' where "path = path' @ [w'']" "length path' = n" "execute_traced step (initialWorld W) w'' path'" "execute_step step w'' w'"
+        using \<open>execute_traced step (initialWorld W) w' path\<close> \<open>length path = Suc n\<close> execute_traced_coherence_Suc by blast
+      have "accepted (world_state w'') \<subseteq> accepted (world_state w')"
+        using \<open>execute_step step w'' w'\<close> accepted_step_monotonic by blast
+      have "val \<in> accepted (world_state w'') \<or> val \<in> accepted (world_state w') - accepted (world_state w'')"
+        by (simp add: \<open>val \<in> accepted (world_state w')\<close>)
+      moreover have "val \<in> accepted (world_state w'') \<Longrightarrow> \<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set (world_events w')"
       proof-
-        assume "val \<in> accepted st' - accepted st"
-        have "execute_step step (st,events,msgs) (st',events',msgs')"
-          using \<open>execute_step step w' (st', events', msgs')\<close> \<open>w' = (st, events, msgs)\<close> by blast
-        obtain p r s where "events' = events @ [(p, Received r (Send s (Accept val)))]"
-          by (meson \<open>execute_step step (st, events, msgs) (st', events', msgs')\<close> \<open>val \<in> accepted st' - accepted st\<close> execute_step_accepted_change_onlyif)
-        show ?thesis
-          using \<open>events' = events @ [(p, Received r (Send.Send s (Accept val)))]\<close> by auto
+        have "val \<in> accepted (world_state w'') \<Longrightarrow> \<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set (world_events w'')"
+          using \<open>\<And>w' path. \<lbrakk>length path = n; execute_traced step (initialWorld W) w' path; val \<in> accepted (world_state w')\<rbrakk> \<Longrightarrow> \<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set (world_events w')\<close> \<open>execute_traced step (initialWorld W) w'' path'\<close> \<open>length path' = n\<close> by blast
+        moreover have "set (world_events w'') \<subseteq> set (world_events w')"
+          using \<open>execute_step step w'' w'\<close> execute_step_events_increasing_as_set by blast
+        ultimately show "val \<in> accepted (world_state w'') \<Longrightarrow> \<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set (world_events w')"
+          by blast
       qed
-      ultimately show "\<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set events'"
+      moreover have "val \<in> accepted (world_state w') - accepted (world_state w'') \<Longrightarrow> \<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set (world_events w')"
+      proof-
+        assume "val \<in> accepted (world_state w') - accepted (world_state w'')"
+        have "execute_step step w'' w'"
+          by (simp add: \<open>execute_step step w'' w'\<close>)
+        obtain p r s where "world_events w' = world_events w'' @ [(p, Received r (Send s (Accept val)))]"
+          by (meson \<open>execute_step step w'' w'\<close> \<open>val \<in> accepted (world_state w') - accepted (world_state w'')\<close> execute_step_accepted_change_onlyif)
+        show ?thesis
+          using \<open>world_events w' = world_events w'' @ [(p, Received r (Send.Send s (Accept val)))]\<close> by auto
+      qed
+      ultimately show "\<exists>p r s. (p, Received r (Send.Send s (Accept val))) \<in> set (world_events w')"
         by blast
     qed
   }
   thus ?thesis
-    using \<open>execute_traced step (initialWorld W) (st', events', msgs') path\<close> assms(2) that by auto
+    using \<open>execute_traced step (initialWorld W) w' path\<close> assms(2) that by blast
 qed
 
 theorem liveness:
   assumes "execute step (initialWorld W) w"
-  obtains w' where "execute step w w'" "ran (messages (SQS.queue (queue ((\<lambda>(a,b,c). a) w')))) = {}" "accepted ((\<lambda>(a,b,c). a) w') = {0..W}"
+  obtains w' where "execute step w w'" "ran (messages (SQS.queue (queue (world_state w')))) = {}" "accepted (world_state w') = {0..W}"
   sorry
 
 end
